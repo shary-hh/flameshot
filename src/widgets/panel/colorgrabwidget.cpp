@@ -13,10 +13,10 @@
 #include <stdexcept>
 
 // Width (= height) and zoom level of the widget before the user clicks
-#define WIDTH1 77
+#define WIDTH1 120
 #define ZOOM1 11
 // Width (= height) and zoom level of the widget after the user clicks
-#define WIDTH2 165
+#define WIDTH2 240
 #define ZOOM2 15
 
 // NOTE: WIDTH1(2) should be divisible by ZOOM1(2) for best precision.
@@ -28,10 +28,13 @@ ColorGrabWidget::ColorGrabWidget(QPixmap* p, QWidget* parent)
   , m_mousePressReceived(false)
   , m_extraZoomActive(false)
   , m_magnifierActive(false)
+  , m_zoom(ZOOM1)
+  , m_lastWidth(0)
 {
     if (p == nullptr) {
         throw std::logic_error("Pixmap must not be null");
     }
+    m_screenImage = m_pixmap->toImage();
     setAttribute(Qt::WA_DeleteOnClose);
     // We don't need this widget to receive mouse events because we use
     // eventFilter on other objects that do
@@ -133,6 +136,15 @@ bool ColorGrabWidget::eventFilter(QObject*, QEvent* event)
         return true;
     } else if (event->type() == QEvent::MouseButtonDblClick) {
         return true;
+    } else if (event->type() == QEvent::Wheel) {
+        auto* wheelEvent = static_cast<QWheelEvent*>(event);
+        if (wheelEvent->angleDelta().y() > 0) {
+            m_zoom = qMin(50.0f, m_zoom + 1.0f);
+        } else {
+            m_zoom = qMax(2.0f, m_zoom - 1.0f);
+        }
+        updateWidget();
+        return true;
     }
     return false;
 }
@@ -142,7 +154,39 @@ void ColorGrabWidget::paintEvent(QPaintEvent*)
     QPainter painter(this);
     if (!painter.isActive())
         return;
-    painter.drawImage(QRectF(0, 0, width(), height()), m_previewImage);
+
+    int width = this->width();
+    float zoom = m_zoom;
+    QPoint adjustedCursorPos = cursorPos();
+
+    QRect sourceRect(0, 0, width / zoom, width / zoom);
+    sourceRect.moveCenter(adjustedCursorPos);
+
+    painter.drawImage(rect(), m_screenImage, sourceRect);
+
+    // Draw circular border
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.setPen(QPen(Qt::darkGray, 4));
+    painter.setBrush(Qt::NoBrush);
+    painter.drawEllipse(rect().adjusted(2, 2, -2, -2));
+
+    // Draw pixel grid if zoom is high enough
+    if (m_zoom >= 5.0f) {
+        painter.setPen(QColor(128, 128, 128, 100));
+        for (float x = 0; x <= width; x += m_zoom) {
+            painter.drawLine(QPointF(x, 0), QPointF(x, height()));
+        }
+        for (float y = 0; y <= height(); y += m_zoom) {
+            painter.drawLine(QPointF(0, y), QPointF(width, y));
+        }
+    }
+
+    // Highlight the center pixel
+    painter.setPen(QPen(Qt::red, 1));
+    painter.setBrush(Qt::NoBrush);
+    float centerX = (width - m_zoom) / 2.0f;
+    float centerY = (height() - m_zoom) / 2.0f;
+    painter.drawRect(QRectF(centerX, centerY, m_zoom, m_zoom));
 }
 
 void ColorGrabWidget::showEvent(QShowEvent*)
@@ -158,12 +202,6 @@ QPoint ColorGrabWidget::cursorPos() const
 /// @note The point is in screen coordinates.
 QColor ColorGrabWidget::getColorAtPoint(const QPoint& p) const
 {
-    if (m_extraZoomActive && geometry().contains(p)) {
-        QPoint point = mapFromGlobal(p);
-        // we divide coordinate-wise to avoid rounding to nearest
-        return m_previewImage.pixel(
-          QPoint(point.x() / ZOOM2, point.y() / ZOOM2));
-    }
     QPoint point = p;
 #if defined(Q_OS_MACOS)
     QScreen* currentScreen = QGuiAppCurrentScreen().currentScreen();
@@ -174,20 +212,27 @@ QColor ColorGrabWidget::getColorAtPoint(const QPoint& p) const
                          currentScreen->devicePixelRatio());
     }
 #endif
-    QPixmap pixel = m_pixmap->copy(QRect(point, point));
-    return pixel.toImage().pixel(0, 0);
+    if (point.x() < 0 || point.y() < 0 || point.x() >= m_screenImage.width() || point.y() >= m_screenImage.height()) {
+        return QColor();
+    }
+    return m_screenImage.pixelColor(point);
 }
 
 void ColorGrabWidget::setExtraZoomActive(bool active)
 {
     m_extraZoomActive = active;
+    if (active) {
+        m_zoom = ZOOM2;
+    } else {
+        m_zoom = ZOOM1;
+    }
     if (!active && !m_magnifierActive) {
         hide();
     } else {
         if (!isVisible()) {
             QTimer::singleShot(250, this, [this]() { show(); });
         } else {
-            QTimer::singleShot(250, this, [this]() { updateWidget(); });
+            updateWidget();
         }
     }
 }
@@ -201,31 +246,14 @@ void ColorGrabWidget::setMagnifierActive(bool active)
 void ColorGrabWidget::updateWidget()
 {
     int width = m_extraZoomActive ? WIDTH2 : WIDTH1;
-    float zoom = m_extraZoomActive ? ZOOM2 : ZOOM1;
-    // Set window size and move its center to the mouse cursor
-    QRect rect(0, 0, width, width);
 
-    auto realCursorPos = cursorPos();
-    auto adjustedCursorPos = realCursorPos;
-
-#if defined(Q_OS_MACOS)
-    QScreen* currentScreen = QGuiAppCurrentScreen().currentScreen();
-    if (currentScreen) {
-        adjustedCursorPos =
-          QPoint((realCursorPos.x() - currentScreen->geometry().x()) *
-                   currentScreen->devicePixelRatio(),
-                 (realCursorPos.y() - currentScreen->geometry().y()) *
-                   currentScreen->devicePixelRatio());
+    if (m_lastWidth != width) {
+        setMask(QRegion(0, 0, width, width, QRegion::Ellipse));
+        m_lastWidth = width;
+        setFixedSize(width, width);
     }
-#endif
 
-    rect.moveCenter(cursorPos());
-    setGeometry(rect);
-    // Store a pixmap containing the zoomed-in section around the cursor
-    QRect sourceRect(0, 0, width / zoom, width / zoom);
-    sourceRect.moveCenter(adjustedCursorPos);
-    m_previewImage = m_pixmap->copy(sourceRect).toImage();
-    // Repaint
+    move(cursorPos() - QPoint(width / 2, width / 2));
     update();
 }
 

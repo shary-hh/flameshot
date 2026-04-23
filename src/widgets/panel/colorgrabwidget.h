@@ -39,4 +39,7 @@ private:
     bool m_mousePressReceived;
     bool m_extraZoomActive;
     bool m_magnifierActive;
+    float m_zoom;
+    QImage m_screenImage;
+    int m_lastWidth;
 };

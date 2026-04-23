@@ -8,6 +8,7 @@
 #include "widgets/panel/utilitypanel.h"
 
 #include <QApplication>
+#include <QClipboard>
 #include <QCheckBox>
 #include <QKeyEvent>
 #include <QLabel>
@@ -16,6 +17,9 @@
 #include <QShortcut>
 #include <QSlider>
 #include <QVBoxLayout>
+#include <QGridLayout>
+#include <QPainter>
+#include <QGroupBox>
 #if defined(Q_OS_MACOS)
 #include <QScreen>
 #endif
@@ -57,18 +61,16 @@ SidePanelWidget::SidePanelWidget(QPixmap* p, QWidget* parent)
     auto* colorText = new QLabel(tr("Active Color: "));
 
     m_colorLabel = new QLabel();
-    m_colorLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    m_colorLabel->setFixedSize(100, 30);
+    m_colorLabel->setFrameStyle(QFrame::Panel | QFrame::Sunken);
+    m_colorLabel->setLineWidth(1);
 
     colorHBox->addWidget(colorText);
     colorHBox->addWidget(m_colorLabel);
+    colorHBox->addStretch();
     colorLayout->addLayout(colorHBox, 2, 0);
 
     m_layout->addLayout(colorLayout);
-
-    m_colorWheel = new color_widgets::ColorWheel(this);
-    m_colorWheel->setColor(m_color);
-    m_colorHex = new QLineEdit(this);
-    m_colorHex->setAlignment(Qt::AlignCenter);
 
     QColor background = this->palette().window().color();
     bool isDark = ColorUtils::colorIsDark(background);
@@ -78,8 +80,67 @@ SidePanelWidget::SidePanelWidget(QPixmap* p, QWidget* parent)
     m_colorGrabButton = new QPushButton(grabIcon, tr("Grab Color"));
 
     m_layout->addWidget(m_colorGrabButton);
-    m_layout->addWidget(m_colorWheel);
+    m_colorWheel = new color_widgets::ColorWheel(this);
+    m_colorWheel->setColor(m_color);
+    m_colorWheel->setMinimumSize(180, 180);
+    m_layout->addWidget(m_colorWheel, 0, Qt::AlignCenter);
+
+    // Create RGB and Alpha controls
+    auto* rgbLayout = new QGridLayout();
+
+    m_redSpin = new QSpinBox(this);
+    m_greenSpin = new QSpinBox(this);
+    m_blueSpin = new QSpinBox(this);
+    m_alphaSpin = new QSpinBox(this);
+
+    m_redSlider = new QSlider(Qt::Horizontal, this);
+    m_greenSlider = new QSlider(Qt::Horizontal, this);
+    m_blueSlider = new QSlider(Qt::Horizontal, this);
+    m_alphaSlider = new QSlider(Qt::Horizontal, this);
+
+    QString labelStyle = "QLabel { font-weight: bold; }";
+    auto addRgbRow = [&](const QString& name, QSlider* slider, QSpinBox* spin, int row) {
+        auto* label = new QLabel(name);
+        label->setStyleSheet(labelStyle);
+        slider->setRange(0, 255);
+        spin->setRange(0, 255);
+        rgbLayout->addWidget(label, row, 0);
+        rgbLayout->addWidget(slider, row, 1);
+        rgbLayout->addWidget(spin, row, 2);
+    };
+
+    addRgbRow("R", m_redSlider, m_redSpin, 0);
+    addRgbRow("G", m_greenSlider, m_greenSpin, 1);
+    addRgbRow("B", m_blueSlider, m_blueSpin, 2);
+    addRgbRow("A", m_alphaSlider, m_alphaSpin, 3);
+
+    auto* rgbGroup = new QGroupBox(tr("RGB / Alpha"), this);
+    rgbGroup->setLayout(rgbLayout);
+    m_layout->addWidget(rgbGroup);
+
+    m_colorHex = new QLineEdit(this);
+    m_colorHex->setAlignment(Qt::AlignCenter);
+    m_colorHex->setToolTip(tr("Hex Color (Double click to copy)"));
     m_layout->addWidget(m_colorHex);
+
+    m_colorRgba = new QLineEdit(this);
+    m_colorRgba->setAlignment(Qt::AlignCenter);
+    m_colorRgba->setReadOnly(true);
+    m_colorRgba->setToolTip(tr("RGBA Color (Double click to copy)"));
+    m_layout->addWidget(m_colorRgba);
+
+    // Copy on double click
+    connect(m_colorHex, &QLineEdit::selectionChanged, this, [=, this]() {
+        if (m_colorHex->hasSelectedText()) {
+             QApplication::clipboard()->setText(m_colorHex->text());
+        }
+    });
+
+    connect(m_colorRgba, &QLineEdit::selectionChanged, this, [=, this]() {
+        if (m_colorRgba->hasSelectedText()) {
+             QApplication::clipboard()->setText(m_colorRgba->text());
+        }
+    });
 
     QHBoxLayout* gridHBoxLayout = new QHBoxLayout();
     m_gridCheck = new QCheckBox(tr("Display grid"), this);
@@ -138,6 +199,20 @@ SidePanelWidget::SidePanelWidget(QPixmap* p, QWidget* parent)
             qOverload<int>(&QSpinBox::valueChanged),
             this,
             &SidePanelWidget::gridSizeChanged);
+
+    // RGB and Alpha sigslots
+    auto connectRgb = [&](QSlider* slider, QSpinBox* spin) {
+        connect(slider, &QSlider::valueChanged, spin, &QSpinBox::setValue);
+        connect(spin, qOverload<int>(&QSpinBox::valueChanged), slider, &QSlider::setValue);
+        connect(spin, qOverload<int>(&QSpinBox::valueChanged), this, &SidePanelWidget::onRgbChanged);
+    };
+
+    connectRgb(m_redSlider, m_redSpin);
+    connectRgb(m_greenSlider, m_greenSpin);
+    connectRgb(m_blueSlider, m_blueSpin);
+    connectRgb(m_alphaSlider, m_alphaSpin);
+
+    m_layout->addStretch();
 }
 
 void SidePanelWidget::onColorChanged(const QColor& color)
@@ -201,9 +276,84 @@ void SidePanelWidget::finalizeGrab()
 
 void SidePanelWidget::updateColorNoWheel(const QColor& c)
 {
-    m_colorLabel->setStyleSheet(
-      QStringLiteral("QLabel { background-color : %1; }").arg(c.name()));
-    m_colorHex->setText(c.name(QColor::HexRgb));
+    // Create checkerboard background for transparency preview
+    QPixmap checkerboard(16, 16);
+    QPainter p(&checkerboard);
+    p.fillRect(0, 0, 8, 8, Qt::lightGray);
+    p.fillRect(8, 8, 8, 8, Qt::lightGray);
+    p.fillRect(8, 0, 8, 8, Qt::white);
+    p.fillRect(0, 8, 8, 8, Qt::white);
+    p.end();
+
+    QSize labelSize = m_colorLabel->size();
+    if (labelSize.width() <= 0 || labelSize.height() <= 0) {
+        labelSize = QSize(100, 30);
+    }
+    QPixmap preview(labelSize);
+    preview.fill(Qt::transparent);
+    QPainter previewPainter(&preview);
+    previewPainter.drawTiledPixmap(preview.rect(), checkerboard);
+    previewPainter.fillRect(preview.rect(), c);
+    previewPainter.end();
+
+    m_colorLabel->setPixmap(preview);
+
+    // Update Hex input (support #RRGGBBAA if alpha < 255)
+    if (c.alpha() < 255) {
+        m_colorHex->setText(c.name(QColor::HexArgb));
+    } else {
+        m_colorHex->setText(c.name(QColor::HexRgb));
+    }
+
+    m_colorRgba->setText(QString("rgba(%1, %2, %3, %4)")
+                         .arg(c.red())
+                         .arg(c.green())
+                         .arg(c.blue())
+                         .arg(QString::number(c.alpha() / 255.0, 'f', 2)));
+
+    // Update RGB spinboxes and sliders without triggering signals
+    m_redSpin->blockSignals(true);
+    m_greenSpin->blockSignals(true);
+    m_blueSpin->blockSignals(true);
+    m_alphaSpin->blockSignals(true);
+    m_redSlider->blockSignals(true);
+    m_greenSlider->blockSignals(true);
+    m_blueSlider->blockSignals(true);
+    m_alphaSlider->blockSignals(true);
+
+    m_redSpin->setValue(c.red());
+    m_greenSpin->setValue(c.green());
+    m_blueSpin->setValue(c.blue());
+    m_alphaSpin->setValue(c.alpha());
+    m_redSlider->setValue(c.red());
+    m_greenSlider->setValue(c.green());
+    m_blueSlider->setValue(c.blue());
+    m_alphaSlider->setValue(c.alpha());
+
+    m_redSpin->blockSignals(false);
+    m_greenSpin->blockSignals(false);
+    m_blueSpin->blockSignals(false);
+    m_alphaSpin->blockSignals(false);
+    m_redSlider->blockSignals(false);
+    m_greenSlider->blockSignals(false);
+    m_blueSlider->blockSignals(false);
+    m_alphaSlider->blockSignals(false);
+}
+
+void SidePanelWidget::onRgbChanged()
+{
+    QColor c(m_redSpin->value(),
+             m_greenSpin->value(),
+             m_blueSpin->value(),
+             m_alphaSpin->value());
+    if (c != m_color) {
+        emit colorChanged(c);
+    }
+}
+
+void SidePanelWidget::onAlphaChanged()
+{
+    onRgbChanged();
 }
 
 bool SidePanelWidget::eventFilter(QObject* obj, QEvent* event)

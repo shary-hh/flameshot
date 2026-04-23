@@ -46,6 +46,8 @@ private slots:
     void onColorGrabFinished();
     void onColorGrabAborted();
     void onTemporaryColorUpdated(const QColor& color);
+    void onRgbChanged();
+    void onAlphaChanged();
 
 private:
     void finalizeGrab();
@@ -60,6 +62,7 @@ private:
     color_widgets::ColorWheel* m_colorWheel;
     QLabel* m_colorLabel;
     QLineEdit* m_colorHex;
+    QLineEdit* m_colorRgba;
     QPixmap* m_pixmap;
     QColor m_color;
     QColor m_revertColor;
@@ -68,4 +71,7 @@ private:
     int m_toolSize{};
     QCheckBox* m_gridCheck{ nullptr };
     QSpinBox* m_gridSizeSpin{ nullptr };
+
+    QSpinBox *m_redSpin, *m_greenSpin, *m_blueSpin, *m_alphaSpin;
+    QSlider *m_redSlider, *m_greenSlider, *m_blueSlider, *m_alphaSlider;
 };

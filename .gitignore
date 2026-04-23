@@ -82,3 +82,9 @@ result-*
 
 # direnv
 .direnv
+
+# Custom AppImage build artifacts
+build-appimage/
+tools-appimage/
+Flameshot.AppDir/
+*.AppImage
